@@ -481,10 +481,10 @@ def calculate_planet_period(file_data, test_radius, MODELS=None, cnn=None,
             placeholder_error = np.ones(len(chi2_array))
 
             mProt5 = stella_rewrite.MeasureProt([tic], [time], [chi2_array[m][0]], [placeholder_error])
-            mProt5.run_LS_re()
+            mProt5.run_LS_re(star_period = star_period)
 
             mProt10 = stella_rewrite.MeasureProt([tic], [time], [chi2_array[m][1]], [placeholder_error])
-            mProt10.run_LS_re()
+            mProt10.run_LS_re(star_period = star_period)
 
             results05.append(mProt5.LS_results)
             results010.append(mProt10.LS_results)
@@ -532,6 +532,7 @@ def find_the_munchkins(data_table, test_radius, detrend_method, injection=False,
             file_data = data_table[i]
             tic = file_data['tic']
             filename = file_data['filename']
+            
             file_mod_dict = model_dict[filename]
 
 
