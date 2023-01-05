@@ -481,10 +481,10 @@ def calculate_planet_period(file_data, test_radius, MODELS=None, cnn=None,
             placeholder_error = np.ones(len(chi2_array))
 
             mProt5 = stella_rewrite.MeasureProt([tic], [time], [chi2_array[m][0]], [placeholder_error])
-            mProt5.run_LS_re(star_period = star_period)
+            mProt5.run_LS(star_period = star_period)
 
             mProt10 = stella_rewrite.MeasureProt([tic], [time], [chi2_array[m][1]], [placeholder_error])
-            mProt10.run_LS_re(star_period = star_period)
+            mProt10.run_LS(star_period = star_period)
 
             results05.append(mProt5.LS_results)
             results010.append(mProt10.LS_results)

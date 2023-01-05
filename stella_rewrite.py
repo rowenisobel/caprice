@@ -131,7 +131,7 @@ class MeasureProt(object):
         return popt
 
     
-    def run_LS_re(self, minf=1/12.5, maxf=1/1.5, spp=50, star_period=None):
+    def run_LS(self, star_period, minf=1/12.5, maxf=1/0.1, spp=50):
         """ Runs LS fit for each light curve. 
         Parameters
         ----------
@@ -145,108 +145,79 @@ class MeasureProt(object):
         ----------
         LS_results : astropy.table.Table
         """
-        def mask(freq, power, per, popt, arg, star_period=None):
-            """
-            Searches and masks resonances of a given period
-            """
-            nonlocal spp, minf, maxf
+        def per_orbit(t, f, star_period):
+            nonlocal minf, maxf, spp
+            freq, power = LombScargle(t, f).autopower(minimum_frequency=minf,
+                                                      maximum_frequency=maxf,
+                                                      samples_per_peak=spp)
+            per = 1/freq
+            res_list = [0.5, 1.0, 2.0, 4.0, 8.0]
+            resonances = [star_period * i for i in res_list]
 
-            if star_period != None:
-                perlist = star_period * np.array([0.5, 1.0, 2.0, 4.0, 8.0])
-            else:
-                perlist = per[arg] * np.array([0.5, 1.0, 2.0, 4.0, 8.0])
-
-            remove_res = np.zeros(len(per))
             maskreg = int(spp/1.5)
-            for p in perlist:
-                where = np.where( (per <= p))[0]
+
+            remove_star =  np.zeros(len(per))
+
+            for r in resonances:
+                where = np.where((per <= r))[0]
                 if len(where) > 0:
                     ind = int(where[0])
-                    if ind-maskreg > 0 and ind<len(per)-maskreg:
-                        remove_res[int(ind-maskreg):int(ind+maskreg)] = 1
+                    lower_bound = ind - maskreg
+                    upper_bound = ind + maskreg
+                    total_range = upper_bound - lower_bound
+                    if lower_bound > 0 and ind < len(per) - maskreg:
+                        remove_star[int(lower_bound):int(upper_bound)] = np.ones(total_range)
                     elif ind < maskreg:
-                        remove_res[0:int(maskreg)] = 1
-                    elif ind > len(per)-maskreg:
-                        remove_res[int(len(per)-maskreg):len(per)] = 1
+                        remove_star[0:int(maskreg)] = np.ones(maskreg)
+                    elif ind > len(per) - maskreg:
+                        remove_star[int(len(per) -  maskreg):len(per)] = np.ones(maskreg)
+            if resonances[1] == 1/minf:
+                remove_star[0:int(spp/2)] =  np.ones(int(spp/2))
+
+            rs = remove_star == 0
+            per_ns = per[rs]
+            power_ns = power[rs]
+
+            arg = np.argmax(power_ns)
+            popt = self.fit_LS_peak(per_ns, power_ns, arg)
+
+            perlist = [per_ns[arg] * i for i in res_list]
+            
+            remove_res = np.zeros(len(per_ns))
+            for p in perlist:
+                where = np.where((per_ns <= p))[0]
+                if len(where) > 0:
+                    ind = int(where[0])
+                    lower_bound = ind - maskreg
+                    upper_bound = ind + maskreg
+                    total_range = upper_bound - lower_bound
+                    if lower_bound > 0 and ind < len(per_ns) - maskreg:
+                        remove_res[int(lower_bound):int(upper_bound)] = np.ones(total_range)
+                    elif ind < maskreg:
+                        remove_res[0:int(maskreg)] = np.ones(maskreg)
+                    elif ind > len(per_ns) - maskreg:
+                        remove_res[int(len(per_ns) -  maskreg):len(per_ns)] = np.ones(maskreg)
             if perlist[1] == 1/minf:
                 remove_res[0:int(spp/2)] = 1
 
             rr = remove_res == 0
-            return power[rr], per[rr], freq[rr]
+            arg1 = np.argmax(power_ns[rr])
+            ## REDOS PERIOD ROUTINE FOR SECOND HIGHEST PEAK 
+            if arg1 == len(per_ns[rr]):
+                arg1 = int(arg1-3)
 
-        def per_orbit(t, f):
-            nonlocal maxf, spp, star_period
-
-            minf = 1/(t[-1]-t[0])
-            if minf > 1/12.0:
-                minf = 1/12.0
-
-            freq, power = LombScargle(t, f).autopower(minimum_frequency=minf,
-                                                      maximum_frequency=maxf,
-                                                      samples_per_peak=spp)
-            if star_period != None:
-                arg = np.argwhere(freq <= 1/star_period)[-1]
-                per = 1.0/freq
-                popt = self.fit_LS_peak(per, power, arg)
-                
-                ## SEARCHES & MASKS RESONANCES OF THE GIVEN STAR PERIOD AS WELL AS THE PERIOD ITSELF
-                masked_power, masked_per, masked_freq = mask(freq, power, per, popt, arg, star_period)
-
-                arg1 = np.argmax(masked_power)
-
-                ## REDOS PERIOD ROUTINE FOR SECOND HIGHEST PEAK 
-                if arg1 == len(masked_per):
-                    arg1 = int(arg1-3)
-
-                popt2 = self.fit_LS_peak(masked_per, masked_power, arg1)
-
-                masked_power2, masked_per2, masked_freq2 = mask(masked_freq, masked_power, masked_per, popt2, arg1)
-
-                
-                arg2 = np.argmax(masked_power2) 
-
-                if arg2 == len(masked_per2):
-                    arg2 = int(arg2-3) 
-
-                popt3 = self.fit_LS_peak(masked_per2, masked_power2, arg2)              
-
-                
-                maxpower = masked_power[arg1]
-                secpower = masked_power2[arg2]
-
-                bestperiod = masked_per[arg1]
-                secbperiod = masked_per2[arg2]
-
-                bestwidth = popt[0]
-
-                return bestperiod, secbperiod, maxpower, secpower, bestwidth
-
-            elif star_period == None:
-                arg = np.argmax(power)
-                per = 1.0/freq
-                popt = self.fit_LS_peak(per, power, arg)
-                
-                ## SEARCHES & MASKS RESONANCES OF THE BEST-FIT PERIOD
-                masked_power, masked_per, masked_freq = mask(freq, power, per, popt, arg)
-                
-                arg1 = np.argmax(masked_power)
-
-                ## REDOS PERIOD ROUTINE FOR SECOND HIGHEST PEAK 
-                if arg1 == len(masked_per):
-                    arg1 = int(arg1-3)
-
-                popt2 = self.fit_LS_peak(masked_per, masked_power, arg1)
-                
-                maxpower = power[arg]
-                secpower = masked_power[arg1]
-
-                bestperiod = per[arg]
-                secbperiod = masked_per[arg1]
-
-                bestwidth = popt[0]
-
-                return bestperiod, secbperiod, maxpower, secpower, bestwidth
+            popt2 = self.fit_LS_peak(per_ns[rr], power_ns[rr], arg1)
             
+            maxpower = power_ns[arg]
+            secpower = power_ns[rr][arg1]
+
+            bestperiod = per_ns[arg]
+            secbperiod = per_ns[rr][arg1]
+
+            bestwidth = popt[0]
+
+            return bestperiod, secbperiod, maxpower, secpower, bestwidth
+
 
         tab = Table()
 
@@ -281,8 +252,8 @@ class MeasureProt(object):
             t1, f1 = time[:brk[0]], flux[:brk[0]]#[300:-500], flux[:brk[0]]#[300:-500]
             t2, f2 = time[brk[0]:], flux[brk[0]:]#[800:-200], flux[brk[0]:]#[800:-200]
 
-            o1_params = per_orbit(t1, f1)
-            o2_params = per_orbit(t2, f2)
+            o1_params = per_orbit(t1, f1, star_period)
+            o2_params = per_orbit(t2, f2, star_period)
 
             both = np.array([o1_params[0], o2_params[0]])
             avg_period = np.nanmedian(both)
