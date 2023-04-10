@@ -18,6 +18,8 @@ from scipy.signal import savgol_filter
 
 import stella_rewrite
 from stella_rewrite import *
+import test
+from test import *
 
 
 import transitleastsquares as tls
@@ -110,7 +112,7 @@ def remove_flares_tess(time_arr, flux_arr, flux_error_arr, stella_models, cnn):
     Outputs: cleaned time, flux, and flux_error arrays stripped of all identified flares.
     """
     preds = []
-    for i, model in enumerate(stella_models):
+    for i, model in tqdm_notebook(enumerate(stella_models)):
         cnn.predict(modelname=model,
                    times=time_arr,  
                    fluxes=flux_arr,
@@ -118,7 +120,7 @@ def remove_flares_tess(time_arr, flux_arr, flux_error_arr, stella_models, cnn):
 
         preds.append(cnn.predictions)
        
-    for t in range(len(time_arr)):
+    for t in tqdm_notebook(range(len(time_arr))):
         temp_pred_arr = np.zeros((len(stella_models), len(time_arr[t])))
         for j in range(len(stella_models)):
             temp_pred_arr[j] = preds[j][t]
@@ -195,13 +197,17 @@ def init_tess_processing(path, catalog, pad=125):
         fluxes.append(temp_lc.flux.value)
         flux_errs.append(temp_lc.flux_err.value)
 
-    res = Table([filenames, tics, times, fluxes, flux_errs, ab_arr, radius_arr], \
-                names=('filename', 'tic', 'time', 'flux', 'flux_err', 'ab', 'star_rad'))
+    res = Table([filenames, tics, ab_arr, radius_arr], \
+                names=('filename', 'tic', 'ab', 'star_rad'))
     tic_per_cat = Table([catalog['tic'], catalog['period']], names=('tic', 'star_period'))
     
     data_table = join(res, tic_per_cat, 'tic')
+
+    times_fin = [list(i) for i in times]
+    fluxes_fin = [list(i) for i in fluxes]
+    flux_errs_fin = [list(i) for i in flux_errs]
     
-    return data_table
+    return data_table, times_fin, fluxes_fin, flux_errs_fin
 
 
 """
@@ -253,7 +259,7 @@ def transit_model(time_arr, t0, period, radius, sm_axis, ab, orb_inc=87.0, \
     
     return flux_co
 
-def create_models(data_table, model_number, per_lims, rad_lims):
+def create_models(data_table, times, fluxes, model_number, per_lims, rad_lims):
 
     """
     Takes the number of desired models, the period and radial limits thereof,
@@ -268,8 +274,8 @@ def create_models(data_table, model_number, per_lims, rad_lims):
         file_data = data_table[i]
         filename = file_data['filename']
         tic = file_data['tic']
-        time = file_data['time']
-        flux = file_data['flux']
+        time = np.array(times[i])
+        flux = np.array(fluxes[i])
         star_rad = file_data['star_rad'] * u.solRad
         ab = file_data['ab']
     
@@ -358,8 +364,8 @@ def lowess_iron(time, flux, window_len, break_tol, detrend_method):
     #window_len=0.375 0.2
     
     flat_flux, trend = flatten(
-        time,
-        flux,
+        list(time),
+        list(flux),
         method=detrend_method,
         window_length=window_len,
         break_tolerance=break_tol,
@@ -394,9 +400,8 @@ def lc_chi2_output(time, flux, star_rad, injection=False, file_mods=None,
         inj_fluxes = [i + flux for i in file_mods]
 
         chi2_array = []
-        inj_trends=[]
+        inj_trends = []
         test_mods = []
-
         for m in tqdm_notebook(range(len(file_mods))):   
 
             inj_flat_flux, inj_trend = lowess_iron(time, inj_fluxes[m], window_len = window_length, 
@@ -431,8 +436,9 @@ def lc_chi2_output(time, flux, star_rad, injection=False, file_mods=None,
         return chi2_array, [trend_mod_5, trend_mod_10]
         
 
-def calculate_planet_period(file_data, test_radius, MODELS=None, cnn=None, 
-                            injection=False, file_mod_dict=False, detrend_method='lowess'):
+def calculate_planet_period(file_data, time, flux, flux_err, test_radius, MODELS=None, cnn=None, 
+                            injection=False, file_mod_dict=False, detrend_method='lowess', chi2_bound=10**(-5),
+                            rat_bound=5.):
 
     """
     Inputs: data table with the filename, tic, time, flux, flux_error, limb-darkening coefficients, and stellar radius
@@ -445,46 +451,44 @@ def calculate_planet_period(file_data, test_radius, MODELS=None, cnn=None,
     """
 
     tic = file_data['tic']
-    time = file_data['time']
-    flux = file_data['flux']
     star_period = file_data['star_period']
     star_rad = [file_data['star_rad']]*u.solRad
    
-    if star_period > 2.:
-        minp = star_period + 0.1
-    else:
-        minp = 2.
+    minp = 0.5
 
 
     if injection == True:
         file_models = file_mod_dict['models']
-        chi2_array, trend, inj_fluxes, inj_trends = lc_chi2_output(time, flux, star_rad = star_rad, 
+        chi2_array, trend, inj_fluxes, inj_trends = lc_chi2_output(np.array(time), np.array(flux), star_rad = star_rad, 
                                                                    injection=True, file_mods=file_models, 
                                                                    detrend_method=detrend_method)
 
         results05     = []
         results010    = []
-        periods5  = []
+        periods5      = []
         powers5       = []
-        periods10 = []
+        periods10     = []
         powers10      = []
         for m in range(len(file_models)):
-            frequency5, power5 = LombScargle(time, chi2_array[m][0]).autopower(minimum_frequency=1/9., 
-                                                                            maximum_frequency=1./2)
+            frequency5, power5 = LombScargle(time, chi2_array[m][0]).autopower(minimum_frequency=1/12.5, 
+                                                                            maximum_frequency=1., 
+                                                                            samples_per_peak=50)
             ls_period5 = [1./i for i in frequency5]
 
-            frequency10, power10 = LombScargle(time, chi2_array[m][1]).autopower(minimum_frequency=1/9., 
-                                                                                maximum_frequency=1./2)
+            frequency10, power10 = LombScargle(time, chi2_array[m][1]).autopower(minimum_frequency=1/12.5, 
+                                                                                maximum_frequency=1.,
+                                                                                samples_per_peak=50)
             ls_period10 = [1./i for i in frequency10]
 
 
             placeholder_error = np.ones(len(chi2_array))
 
-            mProt5 = stella_rewrite.MeasureProt([tic], [time], [chi2_array[m][0]], [placeholder_error])
-            mProt5.run_LS(star_period = star_period)
+            mProt5 = test.MeasureProt([tic], [time], [chi2_array[m][0]], [placeholder_error])
+            mProt5.run_LS(star_period = star_period, minf=1./12.5, maxf=1., chi2_bound=chi2_bound, rat_bound=rat_bound)
+                                    
+            mProt10 = test.MeasureProt([tic], [time], [chi2_array[m][1]], [placeholder_error])
+            mProt10.run_LS(star_period = star_period, minf=1./12.5, maxf=1., chi2_bound=chi2_bound, rat_bound=rat_bound)
 
-            mProt10 = stella_rewrite.MeasureProt([tic], [time], [chi2_array[m][1]], [placeholder_error])
-            mProt10.run_LS(star_period = star_period)
 
             results05.append(mProt5.LS_results)
             results010.append(mProt10.LS_results)
@@ -514,7 +518,8 @@ def calculate_planet_period(file_data, test_radius, MODELS=None, cnn=None,
         return mProt.LS_results, chi2_array, trend, ls_period, power
 
 
-def find_the_munchkins(data_table, test_radius, detrend_method, injection=False, model_dict=None):
+def find_the_munchkins(data_table, times, fluxes, flux_errs, test_radius, detrend_method, injection=False, model_dict=None, 
+                       chi2_bound=10**(-5), rat_bound=5.):
 
     """
     Inputs: data table, test_radius, and model dictionary if required
@@ -530,6 +535,9 @@ def find_the_munchkins(data_table, test_radius, detrend_method, injection=False,
         
         for i in tqdm_notebook(range(len(data_table))):
             file_data = data_table[i]
+            time = times[i]
+            flux = fluxes[i]
+            flux_err = flux_errs[i]
             tic = file_data['tic']
             filename = file_data['filename']
             
@@ -537,11 +545,14 @@ def find_the_munchkins(data_table, test_radius, detrend_method, injection=False,
 
 
             chi2_array, inj_trends, results5, results10, periods5, \
-            periods10, powers5, powers10 = calculate_planet_period(file_data, test_radius=test_radius,
+            periods10, powers5, powers10 = calculate_planet_period(file_data, time, flux, flux_err,
+                                                                    test_radius=test_radius,
                                                                     MODELS=MODELS, cnn=cnn, 
                                                                     injection = injection,
                                                                     file_mod_dict=file_mod_dict,
-                                                                    detrend_method=detrend_method)
+                                                                    detrend_method=detrend_method,
+                                                                    chi2_bound=chi2_bound,
+                                                                    rat_bound=rat_bound)
 
             full_res[file_data['filename']] = {}
             full_res[file_data['filename']]['tic'] = tic
