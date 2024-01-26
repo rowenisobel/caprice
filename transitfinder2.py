@@ -1,5 +1,5 @@
 import lightkurve as lk
-from lightkurve import search_targetpixelfile, search_lightcurve
+from lightkurve import search_targetpixelfile
 from lightkurve.lightcurve import LightCurve
 import pandas as pd
 import numpy as np
@@ -16,7 +16,7 @@ import sys
 import stella
 from scipy.signal import savgol_filter
 
-import stella_rewrite
+import stella_rewrite as stre
 from stella_rewrite import *
 import test
 from test import *
@@ -44,21 +44,46 @@ from statsmodels.tsa.ar_model import AutoReg, ar_select_order
 from random import uniform, choice
 
 __all__ = ['tess_reduction', 'remove_flares_tess', 'init_stella', 'init_tess_processing', 'model_params_randomizer', \
-            'transit_model', 'create_models', 'transit_check', 'lowess_iron', 'lc_chi2_output', 'calculate_planet_period', \
+            'transit_model', 'create_models', 'transit_check', 'flux_iron', 'lc_chi2_output', 'calculate_planet_period', \
             'find_the_munchkins']
 
 def tess_reduction(path, filename, pad):
 
     """
-    Inputs: one SPOC light curve
-    Outputs: the cleaned time, flux, and flux error arrays, plus the limb-darkening coefficients and stellar radius.
+    Inputs
+    -------- 
+    path :  string
+            the filepath for the SPOC files to be reduced
+
+    filename :  string
+                the name of the file to be reduced
+            
+
+    Outputs
+    ---------
+    time_f :    np.ndarray
+                an array of the cleaned times
+
+    flux_f :    np.ndarray
+                an array of the cleaned flux
+
+    flux_err_f :    np.ndarray
+                    an array of the cleaned flux errors
+
+    ab :    tuple
+            quadratic limb-darkening coefficients for the star
+
+    radius :    np.float64
+                stellar radius in Solar radii
     """
 
     hdu = fits.open(os.path.join(path, filename))
     
     ID = hdu[0].header['TICID']
-    ab, mass, mass_min, mass_max, radius, radius_min, radius_max = catalog_info(TIC_ID=ID)
+    ab, mass, mass_min, mass_max, radius, radius_min, radius_max = catalog_info(TIC_ID=ID)   
+        # Accesses TESS catalog data via transitleastsquares
     ab = list(ab)
+
 
     """
     Here we identify and clean the time and flux data contained in the FITS file input.
@@ -67,7 +92,7 @@ def tess_reduction(path, filename, pad):
     time = hdu[1].data['TIME']
     flux = hdu[1].data['PDCSAP_FLUX']
     flux_error = hdu[1].data['PDCSAP_FLUX_ERR']
-    time, flux, flux_error = cleaned_array(time, flux, flux_error)  # remove invalid values such as nan, inf, non, negative
+    time, flux, flux_error = cleaned_array(time, flux, flux_error)  # removes invalid values such as nan, inf, non, negative
     flux = flux / np.median(flux)
 
     """
@@ -105,12 +130,47 @@ def tess_reduction(path, filename, pad):
     return time_f, flux_f, flux_err_f, ab, radius
 
 
-def remove_flares_tess(time_arr, flux_arr, flux_error_arr, stella_models, cnn):
+def remove_flares_tess(tics, time_arr, flux_arr, flux_error_arr, stella_models, cnn):
 
     """
-    Inputs: cleaned time, flux, and flux_error arrays, stella models, and stella cnn
-    Outputs: cleaned time, flux, and flux_error arrays stripped of all identified flares.
+    Inputs
+    -------- 
+    tics :  np.ndarray
+            a list of TIC IDs to be reduced
+
+    time_arr :  np.ndarray
+                the time data arrays of all files to be reduced
+
+    flux_arr :  np.ndarray
+                the flux arrays of all files to be reduced
+
+    flux_err_arr :  np.ndarray
+                    the flux error arrays of all files to be reduced
+
+    stella_models : np.ndarray
+                    the models used by stella to train on flare finding
+
+    cnn :   
+
+            
+
+    Outputs
+    ---------
+    time_arr :  np.ndarray
+                time arrays, stripped of all flares
+
+    flux_arr :  np.ndarray
+                flux arrays, stripped of all flares
+
+    flux_error_arr :    np.ndarray
+                        flux error arrays, stripped of all flares
+
+    flare_table :   astropy.table
+                    a table containing data on all flares found by stella in all
+                    lightcurves being analysed
+
     """
+
     preds = []
     for i, model in tqdm_notebook(enumerate(stella_models)):
         cnn.predict(modelname=model,
@@ -119,6 +179,14 @@ def remove_flares_tess(time_arr, flux_arr, flux_error_arr, stella_models, cnn):
                    errs=flux_error_arr)
 
         preds.append(cnn.predictions)
+
+    ff = stella.FitFlares(id=[tics],
+                      time=[time_arr],
+                      flux=[flux_arr],
+                      flux_err=[flux_error_arr],
+                      predictions=[preds[0]])
+    #ff.identify_flare_peaks(threshold=0.5)
+    #flare_table = ff.flare_table
        
     for t in tqdm_notebook(range(len(time_arr))):
         temp_pred_arr = np.zeros((len(stella_models), len(time_arr[t])))
@@ -135,9 +203,18 @@ def remove_flares_tess(time_arr, flux_arr, flux_error_arr, stella_models, cnn):
     return time_arr, flux_arr, flux_error_arr
 
 def init_stella():
-
     """
-    Initiates Stella's convolutional neural network and downloads its base models.
+    Inputs
+    -------- 
+            
+
+    Outputs
+    ---------
+    MODELS :    np.ndarray
+                the models used by stella to train on flare finding
+
+    cnn :   stella.neural_network.ConvNN
+            the convolutional neural network used by stella to find flares
     """
 
     ds = stella.DownloadSets()
@@ -149,11 +226,39 @@ def init_stella():
     return MODELS, cnn
 
 def init_tess_processing(path, catalog, pad=125):
-
     """
-    Inputs: filepath
-    Outputs: a Table of cleaned and de-flared time, flux, and flux_error arrays alongside the accompanying 
-            filenames, TIC IDs, limb-darkening coefficients, and stellar radii.
+    Inputs
+    -------- 
+    path :  string
+            filepath to SPOC data
+
+    catalog :   astropy.table
+                a table containing data on all stars to be analysed
+
+    pad :   np.int64
+            the number of data points to remove before or after the end 
+            or beginning of an orbit
+
+
+    Outputs
+    ---------
+    data_table :    astrpoy.table
+                    a table containing the cleaned and de-flared time, flux,
+                    and flux_err arrays of each star file, alongside the filenames,
+                    TIC IDs, limb-darkening coefficients, and stellar radii
+
+    times_fin : np.ndarray
+                the cleaned and de-flared time arrays of all star files
+
+    fluxes_fin :    np.ndarray
+                    the cleaned and de-flared flux arrays of all star files
+
+    flux_errs_fin : np.ndarray
+                    the cleaned and de-flared flux error arrays of all star files
+
+    flare_table :   astropy.Table
+                    a table containing data on all flares found by stella in all
+                    lightcurves being analysed
     """
 
     files0 = os.listdir(path)
@@ -184,7 +289,7 @@ def init_tess_processing(path, catalog, pad=125):
 
     MODELS, cnn = init_stella()
 
-    times_s, fluxes_s, flux_errs_s = remove_flares_tess(times_c, fluxes_c, flux_errs_c, MODELS, cnn)
+    times_s, fluxes_s, flux_errs_s = remove_flares_tess(tics, times_c, fluxes_c, flux_errs_c, MODELS, cnn)
 
     times = []
     fluxes = []
@@ -200,8 +305,9 @@ def init_tess_processing(path, catalog, pad=125):
     res = Table([filenames, tics, ab_arr, radius_arr], \
                 names=('filename', 'tic', 'ab', 'star_rad'))
     tic_per_cat = Table([catalog['tic'], catalog['period']], names=('tic', 'star_period'))
+    print(res['tic'], tic_per_cat['tic'])
     
-    data_table = join(res, tic_per_cat, 'tic')
+    data_table = join(res, tic_per_cat, keys='tic', join_type='left')
 
     times_fin = [list(i) for i in times]
     fluxes_fin = [list(i) for i in fluxes]
@@ -217,9 +323,24 @@ INJECTION MODELS
 def model_params_randomizer(model_number, per_lims, rad_lims):
 
     """
-    Takes the limits given for the period and radius of a transit model and creates an array of length
-    model_number containing a randomized period and radius within the bounds. Each row of the resulting 
-    array will hold the settings used to generate that model.
+    Inputs
+    -------- 
+    model_number :  np.int
+                    the number of models per star file
+
+    per_lims :  tuple
+                the maximum and minimum periods (in days) at which to generate models
+
+    rad_lims :  tuple
+                the maximum and minimum radii (in Earth radii) at which to generate models
+
+    
+    Outputs
+    ---------
+    mod_settings :  dictionary
+                    a dictionary encoding the array of randomly generated periods and radii
+                    pertaining to each model within the given bounds
+    
     """
 
     mod_settings={}
@@ -236,10 +357,45 @@ def model_params_randomizer(model_number, per_lims, rad_lims):
 
 def transit_model(time_arr, t0, period, radius, sm_axis, ab, orb_inc=87.0, \
                 ecc=0., long_per=90., limb_dark="quadratic"):
-
     """
-    This function creates a transit model using the batman package. Such a model can either be injected into a lightcurve
-    or passed over a lightcurve to detect a true transit.
+    Inputs
+    -------- 
+    time_arr :  np.ndarray
+                the time array pertaining to one star file
+
+    t0 :    np.int
+            a random index at which to begin producing the transits in the time array
+
+    period :    np.float64
+                the period (in days) at which to generate the transit model
+
+    radius :    np.float64
+                the radius (in Earth radii) at which to generate the transit model
+
+    sm_axis :   np.float64
+                the semi-mejor axis at which to generate the transit model
+
+    ab :    tuple
+            the quadratic limb-darkening coefficients for the star file in question
+
+    orb_inc :   np.float64
+                the orbital inclination at which to generate the transit model
+
+    ecc :   np.float64
+            the eccentricity at which to generate the tranit model
+
+    long_per :  np.float64
+                the longitude of periastron (in degrees)
+
+    limb_dark : string
+                the regime in which to calculate the limb-darkening of the star file
+
+
+    Outputs
+    ---------
+    
+    flux_co :   np.ndarray
+                the transit model to add to the associated flux array of the star
     """
 
     
@@ -262,15 +418,41 @@ def transit_model(time_arr, t0, period, radius, sm_axis, ab, orb_inc=87.0, \
 def create_models(data_table, times, fluxes, model_number, per_lims, rad_lims):
 
     """
-    Takes the number of desired models, the period and radial limits thereof,
-    and data table created above and creates a dictionary of models, their radii, and  
-    their periods arranged by TIC.
+    Inputs
+    -------- 
+    data_table :    astrpoy.table
+                    a table containing the cleaned and de-flared time, flux,
+                    and flux_err arrays of each star file, alongside the filenames,
+                    TIC IDs, limb-darkening coefficients, and stellar radii
+
+    times : np.ndarray
+            the cleaned and de-flared time arrays of all star files
+
+    fluxes :    np.ndarray
+                the cleaned and de-flared flux arrays of all star files
+
+    model_number:   np.int
+                    the number of models per star file to be injected and recovered
+
+    per_lims :  tuple
+                the maximum and minimum periods (in days) at which to generate models
+
+    rad_lims :  tuple
+                the maximum and minimum radii (in Earth radii) at which to generate models
+
+    
+    Outputs
+    ---------
+    models :    astropy.table
+                a table of all the models (n models per star file) to be injected and recovered,
+                in addition to their respective metadata
     """
-    mod_settings = model_params_randomizer(model_number, per_lims, rad_lims)
+
 
     models = {}
 
     for i in tqdm_notebook(range(len(data_table))):
+        mod_settings = model_params_randomizer(model_number, per_lims, rad_lims)
         file_data = data_table[i]
         filename = file_data['filename']
         tic = file_data['tic']
@@ -317,10 +499,68 @@ def transit_check(time_arr, flux_arr, ind, trend, injection=False, inj_flux=Fals
                     long_per=90., ab=[0.1, 0.3], limb_dark="quadratic"):
 
     """
-    This function takes a certain index of the given time array and selects a window around that index. It then calls the 
-    transit_model function to create a test model from the given parameters. This transit model is added to the trend of the
-    light curve calculated via the LOWESS method and calculates the chi-square value between that
-    test transit and the light curve within the selected window of time.
+    Inputs
+    -------- 
+    time_arr :  np.ndarray
+                the time array pertaining to one star file
+
+    flux_arr :  np.ndarray
+                the flux array pertaining to one star file
+
+    ind :   np.int
+            a given index at which to begin producing the transits in the time array
+
+    trend : np.ndarray
+            the trend of the data as calculated in the flux_iron function
+
+    injection : bool
+                the value, True or False, of whether this run of the program is meant to
+                calculate injection-recovery statistics or analyse real data
+
+    inj_flux :  np.ndarray
+                the flux array of the star, injected with a transit model
+
+    radius :    np.float64
+                the radius (in Earth radii) at which to generate the comparator model
+
+    window :    np.int
+                the number of data points pertaining to the width of the sliding window
+
+    period :    np.float64
+                the period in days at which to generate the comparator model. Since the 
+                comparator model is only generated for a single transit, this is an unimportant
+
+    sm_axis :   np.float64
+                the semi-mejor axis at which to generate the comparator model
+
+
+    orb_inc :   np.float64
+                the orbital inclination at which to generate the comparator model
+
+    ecc :   np.float64
+            the eccentricity at which to generate the comparator model
+
+    ab :    tuple
+            default quadratic limb-darkening coefficients for the comparator model
+
+    long_per :  np.float64
+                the longitude of periastron (in degrees) of the comparator model
+
+    limb_dark : string
+                the regime in which to calculate the limb-darkening of the comparator model
+
+
+    Outputs
+    ---------
+    
+    chi2 :  np.ndarray
+            the array of chi2 values representing the difference between the injected
+            flux and the comparator model at the central index of the sliding window for
+            each step
+
+    test_mod :  np.nd_array
+                the flux of the comparator model being used in the sliding window chi2 
+                calculation
     """
 
     t0 = time_arr[ind] + 0.0
@@ -355,13 +595,37 @@ def transit_check(time_arr, flux_arr, ind, trend, injection=False, inj_flux=Fals
     return chi2, test_mod
     
 
-def lowess_iron(time, flux, window_len, break_tol, detrend_method):
+def flux_iron(time, flux, window_len, break_tol, detrend_method):
 
     """
-    This function scrolls through the entire light curve and models it using the LOWESS algorithm contained in the
-    wotan Python package.
+    Inputs
+    -------- 
+
+    time : np.ndarray
+            the cleaned and de-flared time array of a single star file
+
+    flux :  np.ndarray
+            the cleaned and de-flared flux array of a single star file
+
+    window_len :    np.int
+                    the length of the sliding window in indices
+
+    break_tol : np.float64
+                a direction for the detrending algorithm to split its process at breaks
+                longer than this value in units of "time"
+
+    detrend_method :    string
+                        the statistical method by which to detrend
+    
+    Outputs
+    ---------
+    flat_flux : np.ndarray
+                the flattened (detrended) flux array
+
+    trend : np.ndarray
+            the trend removed from the flux
     """
-    #window_len=0.375 0.2
+
     
     flat_flux, trend = flatten(
         list(time),
@@ -379,12 +643,49 @@ def lc_chi2_output(time, flux, star_rad, injection=False, file_mods=None,
                     window_length=0.2, break_tolerance=0.5, detrend_method='lowess'):
     
     """
-    Inputs: time and flux arrays, test radius; if injecting, must also be provided a dictionary of file-specific 
-            models to add to the flux array.
-    Outputs: an array of chi2 values along with the trend of the flux array; if injecting, also outputs the 
-            flux arrays corresponding to each injected model and their trends.
+    Inputs
+    -------- 
+
+    time : np.ndarray
+            the cleaned and de-flared time array of a single star file
+
+    flux :  np.ndarray
+            the cleaned and de-flared flux array of a single star file
+
+    star_rad :  np.float64
+                the radius of the star in question in Solar radii
+
+    injection : bool
+                the value, True or False, of whether this run of the program is meant to
+                calculate injection-recovery statistics or analyse real data
+
+    file_mods : dictionary
+                a dictionary of the N models to be injected into the flux array
+
+
+    window_length : np.int
+                    the length of the sliding window in indices
+
+    break_tolerance :   np.float64
+                        a direction for the detrending algorithm to split its process at breaks
+                        longer than this value in units of "time"
+
+    detrend_method :    string
+                        the statistical method by which to detrend
+    
+    Outputs
+    ---------
+    chi2 :  np.ndarray
+            the array of chi2 values representing the difference between the injected
+            flux and the comparator model at the central index of the sliding window for
+            each step, for N injected models
+
+    trend : np.ndarray
+            the trends removed from the flux, for N injected models
     """
-    flat_flux, trend = lowess_iron(time, flux, window_len = window_length, 
+
+    
+    flat_flux, trend = flux_iron(time, flux, window_len = window_length, 
                                     break_tol=break_tolerance, 
                                     detrend_method=detrend_method)
     test1_e = [5.]*u.earthRad
@@ -404,7 +705,7 @@ def lc_chi2_output(time, flux, star_rad, injection=False, file_mods=None,
         test_mods = []
         for m in tqdm_notebook(range(len(file_mods))):   
 
-            inj_flat_flux, inj_trend = lowess_iron(time, inj_fluxes[m], window_len = window_length, 
+            inj_flat_flux, inj_trend = flux_iron(time, inj_fluxes[m], window_len = window_length, 
                                             break_tol=break_tolerance, detrend_method=detrend_method)
             inj_trends.append(inj_trend)
 
@@ -426,29 +727,96 @@ def lc_chi2_output(time, flux, star_rad, injection=False, file_mods=None,
 
     else:
 
-        chi2_array = np.zeros(len(time))
+        chi2_array = np.zeros((2, len(time)))
+
+        flat_flux, trend = flux_iron(time, flux, window_len = window_length, 
+                                            break_tol=break_tolerance, detrend_method=detrend_method)
 
         for t in range(len(time)):
-            chi2_5, trend_mod_5 = transit_check(time, flux, t, trend, radius=[5.]*u.earthRad)
-            chi2_10, trend_mod_10 = transit_check(time, flux, t, trend, radius =[10.]*u.earthRad)
-            chi2_array[i]=[chi2_5, chi2_10]
+            chi2_5, trend_mod_5 = transit_check(time, flux, t, trend, radius=test1)
+            chi2_10, trand_mod_10 = transit_check(time, flux, t, trend, radius =test2)
+            chi2_array[0][t] += chi2_5 
+            chi2_array[1][t] += chi2_10
             
-        return chi2_array, [trend_mod_5, trend_mod_10]
+        return chi2_array, trend
         
 
-def calculate_planet_period(file_data, time, flux, flux_err, test_radius, MODELS=None, cnn=None, 
+def calculate_planet_period(file_data, time, flux, flux_err, MODELS=None, cnn=None, 
                             injection=False, file_mod_dict=False, detrend_method='lowess', chi2_bound=10**(-5),
                             rat_bound=5.):
 
     """
-    Inputs: data table with the filename, tic, time, flux, flux_error, limb-darkening coefficients, and stellar radius
-            for each SPOC file; a catalog of all said SPOC files, particularly including stellar periods; the test radius 
-            for the sliding window transit check function; and the stella models and cnn.
-            
-            IF INJECTING: also takes a dictionary of models specific to the file at hand.
+    Inputs
+    -------- 
 
-    Outputs: mProt.results, chi2_array, associated trends, ls_period, and ls_power
+    file_data : astropy.table
+                a table containing the metadata for the file being analysed
+
+    time : np.ndarray
+            the cleaned and de-flared time array of a single star file
+
+    flux :  np.ndarray
+            the cleaned and de-flared flux array of a single star file
+
+    flux_err :  np.ndarray
+                the cleaned and de-flared flux error array of a single star file
+
+    MODELS :    np.ndarray
+                the models used by stella to train on flare finding
+
+    cnn:    
+
+
+
+    injection : bool
+                the value, True or False, of whether this run of the program is meant to
+                calculate injection-recovery statistics or analyse real data
+
+    file_mod_dict : dictionary
+                    a dictionary of the N models to be injected into the flux array
+
+    detrend_method :    string
+                        the statistical method by which to detrend
+
+    chi2_bound :    np.float64
+                    the chi2 value at which to remove unreasonably deviant data
+
+    rat_bound : np.float64
+                the LS periodogram peak FWHM bound at which to remove unreasonably
+                deviant data
+    
+    Outputs
+    ---------
+    chi2_array :    np.ndarray
+                    the array of chi2 values representing the difference between the injected
+                    flux and the comparator model at the central index of the sliding window for
+                    each step, for N injected models per star
+
+    inj_trend :     np.ndarray
+                    the trends removed from the fluxes plus the injected transits, for N models
+
+    results5 :  astropy.table
+                the results from the LS periodogram run by stella on each star for a comparator
+                model of 5 Earth radii
+
+    results10 : astropy.table
+                the results from the LS periodogram run by stella on each star for a comparator
+                model of 10 Earth radii 
+
+    periods5 :  np.ndarray
+                the period space array(s) for each star with a comparator model of 5 Earth radii
+
+    periods10 : np.ndarray
+                the period space array(s) for each star with a comparator model of 10 Earth radii
+
+    powers5 :   np.ndarray
+                the power space array(s) for each star with a comparator model of 5 Earth radii 
+
+    powers10 :  np.ndarray
+                the power space array(s) for each star with a comparator model of 10 Earth radii 
+
     """
+
 
     tic = file_data['tic']
     star_period = file_data['star_period']
@@ -503,29 +871,98 @@ def calculate_planet_period(file_data, time, flux, flux_err, test_radius, MODELS
         return chi2_array, inj_trends, results5, results10, periods5, periods10, powers5, powers10
 
     elif injection == False:
-        chi2_array, trend = lc_chi2_output(time, flux, test_radius=test_radius)
+        results05     = []
+        results010    = []
+        periods5      = []
+        powers5       = []
+        periods10     = []
+        powers10      = []
 
-        frequency, power = LombScargle(time, chi2_array).autopower(minimum_frequency=1/9., 
-                                                                    maximum_frequency=1/2.)
-        ls_period = [1./i for i in frequency]
+        chi2_array, trend = lc_chi2_output(np.array(time), np.array(flux), star_rad = star_rad, detrend_method=detrend_method)
+
+        frequency5, power5 = LombScargle(time, chi2_array[0]).autopower(minimum_frequency=1/12.5, 
+                                                                            maximum_frequency=1., 
+                                                                            samples_per_peak=50)
+        ls_period5 = [1./i for i in frequency5]
+
+        frequency10, power10 = LombScargle(time, chi2_array[1]).autopower(minimum_frequency=1/12.5, 
+                                                                            maximum_frequency=1.,
+                                                                            samples_per_peak=50)
+        ls_period10 = [1./i for i in frequency10]
+
 
         placeholder_error = np.ones(len(chi2_array))
 
-        mProt = stella_rewrite.MeasureProt([tic], [time_arr], [chi2_array], [placeholder_error])
+        mProt5 = test.MeasureProt([tic], [time], [chi2_array[0]], [placeholder_error])
+        mProt5.run_LS(star_period = star_period, minf=1./12.5, maxf=1., chi2_bound=chi2_bound, rat_bound=rat_bound)
+                                
+        mProt10 = test.MeasureProt([tic], [time], [chi2_array[1]], [placeholder_error])
+        mProt10.run_LS(star_period = star_period, minf=1./12.5, maxf=1., chi2_bound=chi2_bound, rat_bound=rat_bound)
 
-        mProt.run_LS_re() 
 
-        return mProt.LS_results, chi2_array, trend, ls_period, power
+        results05.append(mProt5.LS_results)
+        results010.append(mProt10.LS_results)
+        periods5.append(ls_period5)
+        powers5.append(power5)
+        periods10.append(ls_period10)
+        powers10.append(power10)
+
+        results5 = hstack(results05)
+        results10 = hstack(results010)
+
+        return chi2_array, trend, results5, results10, periods5, periods10, powers5, powers10
 
 
-def find_the_munchkins(data_table, times, fluxes, flux_errs, test_radius, detrend_method, injection=False, model_dict=None, 
+def find_the_munchkins(data_table, times, fluxes, flux_errs, detrend_method, injection=False, model_dict=None, 
                        chi2_bound=10**(-5), rat_bound=5.):
 
     """
-    Inputs: data table, test_radius, and model dictionary if required
-    Outputs: a dictionary of results along with the chi2, trend, time and flux arrays; and a dictionary
-            of supplemental data, including the models, model_settings, etc for each file.
+    Inputs
+    -------- 
+
+    data_table :    astropy.table
+                    a table containing the metadata for all star files being analysed
+
+    times : np.ndarray
+            the cleaned and de-flared time arrays of all star files
+
+    fluxes :    np.ndarray
+                the cleaned and de-flared flux arrays of all star files
+
+    flux_errs : np.ndarray
+                the cleaned and de-flared flux error arrays of all star files
+
+
+    detrend_method :    string
+                        the statistical method by which to detrend star fluxes
+
+
+    injection : bool
+                the value, True or False, of whether this run of the program is meant to
+                calculate injection-recovery statistics or analyse real data
+
+    model_dict :    dictionary
+                    a dictionary of the N models to be injected into the flux array
+
+
+    chi2_bound :    np.float64
+                    the chi2 value at which to remove unreasonably deviant data
+
+    rat_bound : np.float64
+                the LS periodogram peak FWHM bound at which to remove unreasonably
+                deviant data
+    
+    Outputs
+    ---------
+    full_res :  astropy.table
+                a table containing all the results for the data run
+
+    supp_data : astropy.table
+                a table containing the period and power space data of the LS periodograms for
+                each star file, and injected model, if applicable
+
     """
+
 
     MODELS, cnn = init_stella()
 
@@ -546,7 +983,6 @@ def find_the_munchkins(data_table, times, fluxes, flux_errs, test_radius, detren
 
             chi2_array, inj_trends, results5, results10, periods5, \
             periods10, powers5, powers10 = calculate_planet_period(file_data, time, flux, flux_err,
-                                                                    test_radius=test_radius,
                                                                     MODELS=MODELS, cnn=cnn, 
                                                                     injection = injection,
                                                                     file_mod_dict=file_mod_dict,
@@ -565,25 +1001,40 @@ def find_the_munchkins(data_table, times, fluxes, flux_errs, test_radius, detren
             model_dict[file_data['filename']]['periods10'] = periods10
             model_dict[file_data['filename']]['powers5'] = powers5
             model_dict[file_data['filename']]['powers10'] = powers10
+
+
     
 
     else:
 
-        for i in tqdm_notebook(range(len(files))):
+        for i in tqdm_notebook(range(len(data_table))):
             file_data = data_table[i]
-            res, chi2_array, trend, ls_period, power = calculate_planet_period(file_data, test_radius=test_radius,
+            time = times[i]
+            flux = fluxes[i]
+            flux_err = flux_errs[i]
+            tic = file_data['tic']
+            filename = file_data['filename']
+
+            chi2_array, trend, results5, results10, periods5, \
+            periods10, powers5, powers10 = calculate_planet_period(file_data, time, flux, flux_err,
                                                                                 MODELS=MODELS, cnn=cnn, 
                                                                                 detrend_method=detrend_method)
-            full_res[file_data['filename']] = {}
-            full_res[file_data['filename']]['tic'] = tic
-            full_res[file_data['filename']]['results'] = res
-            full_res[file_data['filename']]['chi2'] = chi2_array
-            full_res[file_data['filename']]['trend'] = trend
+            full_res[filename] = {}
+            full_res[filename]['tic'] = tic
+            full_res[filename]['chi2'] = chi2_array
+            full_res[filename]['trend'] = trend
+            full_res[filename]['results_5'] = results5
+            full_res[filename]['results_10'] = results10
 
-            model_dict[file_data['filename']]['ls_power'] = power
-            model_dict[file_data['filename']]['ls_period'] = ls_period
+            supp_data[filename] = {}
+            supp_data[filename]['periods5'] = periods5
+            supp_data[filename]['periods10'] = periods10
+            supp_data[filename]['powers5'] = powers5
+            supp_data[filename]['powers10'] = powers10
 
-    return full_res, model_dict
+    return full_res, supp_data
+
+    
 
 
 
