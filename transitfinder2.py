@@ -43,7 +43,7 @@ from statsmodels.tsa.ar_model import AutoReg, ar_select_order
 
 from random import uniform, choice
 
-__all__ = ['tess_reduction', 'remove_flares_tess', 'init_stella', 'init_tess_processing', 'model_params_randomizer', \
+__all__ = ['tess_reduction', 'remove_flares_tess', 'init_stella', 'stitch_observations', 'init_tess_processing', 'model_params_randomizer', \
             'transit_model', 'create_models', 'transit_check', 'flux_iron', 'lc_chi2_output', 'calculate_planet_period', \
             'find_the_munchkins']
 
@@ -225,7 +225,78 @@ def init_stella():
 
     return MODELS, cnn
 
-def init_tess_processing(path, catalog, pad=125):
+def stitch_observations(data_table, files):
+
+    """
+    Inputs
+    -------- 
+    data_table :    astropy.table
+                    a table containing the cleaned and de-flared time, flux,
+                    and flux_err arrays of each star file, alongside the filenames,
+                    TIC IDs, limb-darkening coefficients, and stellar radii
+
+    files : np.ndarray
+            a list of all star files to be reduced        
+
+    Outputs
+    ---------
+    data_table_concat : np.ndarray
+                        a table containing the cleaned and de-flared time, flux,
+                        and flux_err arrays of each star (all files concatenated), 
+                        alongside the filenames, TIC IDs, limb-darkening coefficients, 
+                        and stellar radii
+
+    times_fin : np.ndarray
+                the cleaned and de-flared time arrays of all stars
+
+    fluxes_fin :    np.ndarray
+                    the cleaned and de-flared flux arrays of all stars
+
+    flux_errs_fin : np.ndarray
+                    the cleaned and de-flared flux error arrays of all stars
+    """
+
+    data_table.sort('tic')
+    tics = np.array(data_table['tic'])
+
+    unique_tics, unique_inds, unique_counts = np.unique(tics, return_index=True, return_counts=True)
+    tics_fin = []
+    files_fin = []
+    ab_fin = []
+    star_rad_fin = []
+    star_per_fin = []
+    lcs_fin = []
+    times_fin = []
+    fluxes_fin =[]
+    flux_errs_fin = []
+
+    for f in range(len(unique_tics)):
+        tic_inds = np.arange(unique_inds[f], unique_inds[f] + unique_counts[f], 1)
+        files = data_table[unique_inds[f]:unique_inds[f] + unique_counts[f]]
+
+        lcs_per_tic = lk.LightCurveCollection(files['lc']).stitch()
+
+
+        tics_fin.append(files['tic'][0])
+        files_fin.append(np.array(files['filename']))
+        ab_fin.append(files['ab'][0])
+        star_rad_fin.append(files['star_rad'][0])
+        star_per_fin.append(files['star_period'][0])
+        lcs_fin.append(lcs_per_tic)
+        times_fin.append(lcs_per_tic.time.value)
+        fluxes_fin.append(lcs_per_tic.flux.value)
+        flux_errs_fin.append(lcs_per_tic.flux_err.value)
+
+
+    data_table_concat = Table([tics_fin, files_fin, ab_fin, star_rad_fin, star_per_fin, lcs_fin], 
+                              names=('tic', 'filename', 'ab', 'star_rad', 'star_period', 'lc'))
+
+    return data_table_concat, times_fin, fluxes_fin, flux_errs_fin
+
+
+
+
+def init_tess_processing(path, catalog, concat=False, pad=125):
     """
     Inputs
     -------- 
@@ -235,6 +306,10 @@ def init_tess_processing(path, catalog, pad=125):
     catalog :   astropy.table
                 a table containing data on all stars to be analysed
 
+    concat :    bool
+                a boolean indicating whether light curves originating from the same stars
+                should be concatenated into single renormalized light curves
+
     pad :   np.int64
             the number of data points to remove before or after the end 
             or beginning of an orbit
@@ -242,7 +317,7 @@ def init_tess_processing(path, catalog, pad=125):
 
     Outputs
     ---------
-    data_table :    astrpoy.table
+    data_table :    astrpy.table
                     a table containing the cleaned and de-flared time, flux,
                     and flux_err arrays of each star file, alongside the filenames,
                     TIC IDs, limb-darkening coefficients, and stellar radii
@@ -295,25 +370,34 @@ def init_tess_processing(path, catalog, pad=125):
     fluxes = []
     flux_errs =[]
 
+    lcs = []
+
     print('Outlier removal in progress...')
     for k in tqdm_notebook(range(len(times_s))):
         temp_lc = LightCurve(time=times_s[k], flux=fluxes_s[k], flux_err=flux_errs_s[k]).remove_outliers()
+
+        lcs.append(temp_lc)
         times.append(temp_lc.time.value)
         fluxes.append(temp_lc.flux.value)
         flux_errs.append(temp_lc.flux_err.value)
 
-    res = Table([filenames, tics, ab_arr, radius_arr], \
-                names=('filename', 'tic', 'ab', 'star_rad'))
+    res = Table([filenames, tics, ab_arr, radius_arr, lcs], \
+                names=('filename', 'tic', 'ab', 'star_rad', 'lc'))
     tic_per_cat = Table([catalog['tic'], catalog['period']], names=('tic', 'star_period'))
-    print(res['tic'], tic_per_cat['tic'])
     
     data_table = join(res, tic_per_cat, keys='tic', join_type='left')
 
-    times_fin = [list(i) for i in times]
-    fluxes_fin = [list(i) for i in fluxes]
-    flux_errs_fin = [list(i) for i in flux_errs]
+    if concat == True:
+
+        return stitch_observations(data_table, files)
+
+    elif concat == False:
+
+        times_fin = [list(i) for i in times]
+        fluxes_fin = [list(i) for i in fluxes]
+        flux_errs_fin = [list(i) for i in flux_errs]
     
-    return data_table, times_fin, fluxes_fin, flux_errs_fin
+        return data_table, times_fin, fluxes_fin, flux_errs_fin
 
 
 """
@@ -865,8 +949,8 @@ def calculate_planet_period(file_data, time, flux, flux_err, MODELS=None, cnn=No
             periods10.append(ls_period10)
             powers10.append(power10)
 
-        results5 = hstack(results05)
-        results10 = hstack(results010)
+        results5 = vstack(np.array(results05))
+        results10 = vstack(np.array(results010))
 
         return chi2_array, inj_trends, results5, results10, periods5, periods10, powers5, powers10
 
